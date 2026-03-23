@@ -32,10 +32,16 @@ from convert_report_to_intake import (
 # ---------------------------------------------------------------------------
 
 def find_file(*candidates):
-    """Return the first existing path from candidates, or None."""
+    """Return the first existing path from candidates, or None.
+    Searches relative to CWD and relative to the script's directory."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     for c in candidates:
         if os.path.exists(c):
             return c
+        # Also try relative to script directory
+        alt = os.path.join(script_dir, c)
+        if os.path.exists(alt):
+            return alt
     return None
 
 # ---------------------------------------------------------------------------
@@ -121,9 +127,11 @@ with st.sidebar:
         st.session_state.ref_labs = load_csv_lookup(tmp_path, 'שם מעבדה', 'קוד מעבדה')
         os.unlink(tmp_path)
         st.success(f"נטענו {len(st.session_state.ref_labs)} מעבדות")
-    elif st.session_state.ref_labs is None and find_file('config/lab_codes.csv', 'config/lab_codes.csv'):
-        st.session_state.ref_labs = load_csv_lookup(find_file('config/lab_codes.csv', 'config/lab_codes.csv'), 'שם מעבדה', 'קוד מעבדה')
-        st.info(f"נטען אוטומטית: {len(st.session_state.ref_labs)} מעבדות")
+    elif st.session_state.ref_labs is None:
+        _l = find_file('config/lab_codes.csv', 'lab_codes.csv')
+        if _l:
+            st.session_state.ref_labs = load_csv_lookup(_l, 'שם מעבדה', 'קוד מעבדה')
+            st.info(f"נטען אוטומטית: {len(st.session_state.ref_labs)} מעבדות")
 
     # Sampler codes
     st.subheader("קודי חברות דיגום")
@@ -137,10 +145,12 @@ with st.sidebar:
             tmp_path, 'שם חברת דיגום', 'קוד חברת דיגום')
         os.unlink(tmp_path)
         st.success(f"נטענו {len(st.session_state.ref_samplers)} חברות")
-    elif st.session_state.ref_samplers is None and find_file('config/sampler_codes.csv', 'config/sampler_codes.csv'):
-        st.session_state.ref_samplers = load_csv_lookup(
-            find_file('config/sampler_codes.csv', 'config/sampler_codes.csv'), 'שם חברת דיגום', 'קוד חברת דיגום')
-        st.info(f"נטען אוטומטית: {len(st.session_state.ref_samplers)} חברות")
+    elif st.session_state.ref_samplers is None:
+        _s = find_file('config/sampler_codes.csv', 'sampler_codes.csv')
+        if _s:
+            st.session_state.ref_samplers = load_csv_lookup(
+                _s, 'שם חברת דיגום', 'קוד חברת דיגום')
+            st.info(f"נטען אוטומטית: {len(st.session_state.ref_samplers)} חברות")
 
     st.divider()
 
@@ -169,8 +179,9 @@ with st.sidebar:
         st.caption("ריק — ייבנה אוטומטית מהקלדות")
 
     # Load from file
-    if find_file('config/well_codes_memory.csv', 'config/well_codes_memory.csv') and not st.session_state.well_memory:
-        st.session_state.well_memory = load_well_memory(find_file('config/well_codes_memory.csv', 'config/well_codes_memory.csv'))
+    _wm = find_file('config/well_codes_memory.csv', 'well_codes_memory.csv')
+    if _wm and not st.session_state.well_memory:
+        st.session_state.well_memory = load_well_memory(_wm)
 
 
 # ---------------------------------------------------------------------------

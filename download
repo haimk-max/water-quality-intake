@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+well_codes_memory.csv
+.DS_Store

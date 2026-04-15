@@ -53,15 +53,21 @@ def load_well_memory(path: str) -> dict:
     with open(path, encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            site = row['אתר'].strip()
-            well_name = row['שם קידוח'].strip()
-            code = int(row['קוד קידוח'].strip())
-            memory[(site, well_name)] = code
+            try:
+                site = row['אתר'].strip()
+                well_name = row['שם קידוח'].strip()
+                code = int(row['קוד קידוח'].strip())
+                memory[(site, well_name)] = code
+            except (KeyError, ValueError):
+                continue
     return memory
 
 
 def save_well_memory(memory: dict, path: str):
-    """Save well code memory to CSV."""
+    """Save well code memory to CSV. Creates parent directory if needed."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=WELL_MEMORY_HEADERS)
         writer.writeheader()

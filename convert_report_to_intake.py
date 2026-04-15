@@ -369,7 +369,9 @@ def parse_date(ws):
 def convert_report(report_path: str, param_map: dict,
                    ref_labs: dict = None, ref_samplers: dict = None,
                    interactive: bool = False, well_memory: dict = None,
-                   historical_data: dict = None):
+                   historical_data: dict = None,
+                   lab_code_override: int = None,
+                   sampler_code_override: int = None):
     """
     Convert a single reporting form to intake rows.
     Returns (rows, errors, warnings) where:
@@ -420,7 +422,13 @@ def convert_report(report_path: str, param_map: dict,
         warnings.extend(lab_warns)
 
     if lab_code is None:
-        errors.append(f"קוד מעבדה חסר ולא ניתן להשלים (שורה 4)")
+        if lab_code_override is not None:
+            lab_code = lab_code_override
+            lab_name_s = str(lab_name).strip() if lab_name else '?'
+            warnings.append(f"קוד מעבדה הוזן ידנית: {lab_code_override} (שם: '{lab_name_s}')")
+        else:
+            lab_name_s = f"'{str(lab_name).strip()}'" if lab_name else "לא ידוע"
+            errors.append(f"קוד מעבדה חסר לשם {lab_name_s} ולא ניתן להשלים (שורה 4)")
 
     # Sampler code
     sampler_name = ws.cell(row=5, column=2).value
@@ -442,7 +450,13 @@ def convert_report(report_path: str, param_map: dict,
         warnings.extend(samp_warns)
 
     if sampler_code is None:
-        errors.append(f"קוד חברת דיגום חסר ולא ניתן להשלים (שורה 5)")
+        if sampler_code_override is not None:
+            sampler_code = sampler_code_override
+            sampler_name_s = str(sampler_name).strip() if sampler_name else '?'
+            warnings.append(f"קוד חברת דיגום הוזן ידנית: {sampler_code_override} (שם: '{sampler_name_s}')")
+        else:
+            sampler_name_s = f"'{str(sampler_name).strip()}'" if sampler_name else "לא ידוע"
+            errors.append(f"קוד חברת דיגום חסר לשם {sampler_name_s} ולא ניתן להשלים (שורה 5)")
 
     # --- Identify wells (columns D onward in rows 7-8) ---
     # Scan columns starting from D. A well column has content in row 7 or 8.

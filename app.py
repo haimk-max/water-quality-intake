@@ -222,7 +222,9 @@ st.success(f"הועלו {len(uploaded_files)} קבצים")
 if st.button("🔄 עבד קבצים", type="primary", use_container_width=True):
     all_rows = []
     all_results = []
-    missing_wells = []  # [(file, site, well_name, col_idx, raw_code)]
+    missing_wells = []  # [(fname, err_msg)]
+    missing_labs = []  # [(fname, err_msg)]
+    missing_samplers = []  # [(fname, err_msg)]
 
     progress = st.progress(0, text="מעבד קבצים...")
 
@@ -247,10 +249,14 @@ if st.button("🔄 עבד קבצים", type="primary", use_container_width=True)
 
         os.unlink(tmp_path)
 
-        # Detect missing well codes from errors
+        # Detect missing codes from errors
         for err in errors:
             if 'קוד קידוח חסר' in err or 'קוד קידוח לא מספרי' in err:
                 missing_wells.append((uploaded.name, err))
+            if 'קוד מעבדה חסר' in err:
+                missing_labs.append((uploaded.name, err))
+            if 'קוד חברת דיגום חסר' in err:
+                missing_samplers.append((uploaded.name, err))
 
         all_rows.extend(rows)
         all_results.append((uploaded.name, errors, warnings, len(rows)))
@@ -261,6 +267,8 @@ if st.button("🔄 עבד קבצים", type="primary", use_container_width=True)
         'all_rows': all_rows,
         'all_results': all_results,
         'missing_wells': missing_wells,
+        'missing_labs': missing_labs,
+        'missing_samplers': missing_samplers,
         'uploaded_files': [(f.name, f.getvalue()) for f in uploaded_files],
     }
     st.rerun()
@@ -276,30 +284,91 @@ if results is None:
 all_rows = results['all_rows']
 all_results = results['all_results']
 missing_wells = results['missing_wells']
+missing_labs = results.get('missing_labs', [])
+missing_samplers = results.get('missing_samplers', [])
 
-# --- Missing well codes interactive resolution ---
+# --- Missing data interactive resolution ---
 
-if missing_wells:
-    st.header("② השלמת קודי קידוח חסרים")
-    st.warning(f"נמצאו {len(missing_wells)} קידוחים עם קוד חסר או לא תקין")
+if missing_labs or missing_samplers or missing_wells:
+    st.header("② השלמת נתונים חסרים")
 
+    # --- Lab codes ---
+    lab_inputs = {}
+    if missing_labs:
+        st.subheader("קודי מעבדה חסרים")
+        st.warning(f"נמצאו {len(missing_labs)} קבצים עם קוד מעבדה חסר")
+        for idx, (fname, err_msg) in enumerate(missing_labs):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input(
+                    "קוד מעבדה",
+                    key=f"lab_code_{idx}",
+                    placeholder="למשל: 6",
+                )
+                if code:
+                    lab_inputs[idx] = code
+
+    # --- Sampler codes ---
+    sampler_inputs = {}
+    if missing_samplers:
+        st.subheader("קודי חברות דיגום חסרים")
+        st.warning(f"נמצאו {len(missing_samplers)} קבצים עם קוד חברת דיגום חסר")
+        for idx, (fname, err_msg) in enumerate(missing_samplers):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input(
+                    "קוד חברת דיגום",
+                    key=f"sampler_code_{idx}",
+                    placeholder="למשל: 23",
+                )
+                if code:
+                    sampler_inputs[idx] = code
+
+    # --- Well codes ---
     well_inputs = {}
-    for idx, (fname, err_msg) in enumerate(missing_wells):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.text(f"📁 {fname}: {err_msg}")
-        with col2:
-            code = st.text_input(
-                "קוד (8 ספרות)",
-                key=f"well_code_{idx}",
-                max_chars=8,
-                placeholder="12345678",
-            )
-            if code:
-                well_inputs[idx] = code
+    if missing_wells:
+        st.subheader("קודי קידוח חסרים")
+        st.warning(f"נמצאו {len(missing_wells)} קידוחים עם קוד חסר או לא תקין")
+        for idx, (fname, err_msg) in enumerate(missing_wells):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input(
+                    "קוד (8 ספרות)",
+                    key=f"well_code_{idx}",
+                    max_chars=8,
+                    placeholder="12345678",
+                )
+                if code:
+                    well_inputs[idx] = code
 
-    if st.button("🔄 עבד מחדש עם הקודים שהוקלדו", use_container_width=True):
-        # Parse entered codes and update well memory
+    # --- Reprocess button ---
+    if st.button("🔄 עבד מחדש עם הנתונים שהוקלדו", use_container_width=True):
+        # Build per-file overrides for lab/sampler codes
+        file_overrides = {}  # {fname: {'lab': int, 'sampler': int}}
+
+        for idx, code_str in lab_inputs.items():
+            try:
+                code_int = int(code_str)
+                fname = missing_labs[idx][0]
+                file_overrides.setdefault(fname, {})['lab'] = code_int
+            except ValueError:
+                st.error(f"קוד מעבדה לא מספרי: '{code_str}'")
+
+        for idx, code_str in sampler_inputs.items():
+            try:
+                code_int = int(code_str)
+                fname = missing_samplers[idx][0]
+                file_overrides.setdefault(fname, {})['sampler'] = code_int
+            except ValueError:
+                st.error(f"קוד חברת דיגום לא מספרי: '{code_str}'")
+
+        # Parse well codes and update well memory
         import openpyxl as _openpyxl
 
         new_memory_entries = {}
@@ -307,7 +376,6 @@ if missing_wells:
             try:
                 code_int = int(code_str)
                 if len(code_str) == 8:
-                    # Extract site and well name from the uploaded file
                     fname = missing_wells[idx][0]
                     for stored_name, stored_bytes in results['uploaded_files']:
                         if stored_name == fname:
@@ -318,7 +386,6 @@ if missing_wells:
                             wb = _openpyxl.load_workbook(tmp_path, data_only=True)
                             ws = wb.active
                             site_name = ws.cell(row=2, column=2).value or '?'
-                            # Find the well name from error message
                             err_msg = missing_wells[idx][1]
                             if "'" in err_msg:
                                 well_name = err_msg.split("'")[1]
@@ -334,20 +401,22 @@ if missing_wells:
                 st.error(f"ערך לא מספרי: {code_str}")
 
         if new_memory_entries:
-            # Save memory to disk
             save_well_memory(st.session_state.well_memory, 'config/well_codes_memory.csv')
-            st.success(f"נשמרו {len(new_memory_entries)} קודים חדשים לזיכרון")
+            st.success(f"נשמרו {len(new_memory_entries)} קודי קידוח חדשים לזיכרון")
 
-        # Re-process all files
+        # Re-process all files with overrides
         all_rows = []
         all_results = []
         missing_wells = []
+        missing_labs = []
+        missing_samplers = []
 
         for stored_name, stored_bytes in results['uploaded_files']:
             with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
                 tmp.write(stored_bytes)
                 tmp_path = tmp.name
 
+            overrides = file_overrides.get(stored_name, {})
             rows, errors, warnings = convert_report(
                 tmp_path,
                 st.session_state.param_map,
@@ -356,12 +425,18 @@ if missing_wells:
                 interactive=False,
                 well_memory=st.session_state.well_memory,
                 historical_data=st.session_state.historical_data,
+                lab_code_override=overrides.get('lab'),
+                sampler_code_override=overrides.get('sampler'),
             )
             os.unlink(tmp_path)
 
             for err in errors:
                 if 'קוד קידוח חסר' in err or 'קוד קידוח לא מספרי' in err:
                     missing_wells.append((stored_name, err))
+                if 'קוד מעבדה חסר' in err:
+                    missing_labs.append((stored_name, err))
+                if 'קוד חברת דיגום חסר' in err:
+                    missing_samplers.append((stored_name, err))
 
             all_rows.extend(rows)
             all_results.append((stored_name, errors, warnings, len(rows)))
@@ -370,6 +445,8 @@ if missing_wells:
             'all_rows': all_rows,
             'all_results': all_results,
             'missing_wells': missing_wells,
+            'missing_labs': missing_labs,
+            'missing_samplers': missing_samplers,
             'uploaded_files': results['uploaded_files'],
         }
         st.rerun()

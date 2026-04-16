@@ -22,6 +22,7 @@ from convert_report_to_intake import (
     load_well_memory,
     save_well_memory,
     load_historical_data,
+    load_bh_lookup,
     convert_report,
     write_intake_file,
     write_error_report,
@@ -125,6 +126,8 @@ if 'well_memory' not in st.session_state:
     st.session_state.well_memory = {}
 if 'historical_data' not in st.session_state:
     st.session_state.historical_data = None
+if 'bh_lookup' not in st.session_state:
+    st.session_state.bh_lookup = None
 if 'conversion_results' not in st.session_state:
     st.session_state.conversion_results = None
 
@@ -209,6 +212,28 @@ with st.sidebar:
 
     st.divider()
 
+    # BH lookup table
+    st.subheader("טבלת קודי קידוחים (BH)")
+    bh_file = st.file_uploader(
+        "Sites_missing_BH_codes.xlsx", type=['xlsx'], key='bh_upload')
+    if bh_file:
+        try:
+            st.session_state.bh_lookup = _load_temp_xlsx(bh_file, load_bh_lookup)
+            st.success(f"נטענו {len(st.session_state.bh_lookup)} קודי קידוח")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת טבלת BH: {e}")
+    elif st.session_state.bh_lookup is None:
+        _bh = find_file('Sites_missing_BH_codes.xlsx',
+                        'config/Sites_missing_BH_codes.xlsx')
+        if _bh:
+            try:
+                st.session_state.bh_lookup = load_bh_lookup(_bh)
+                st.info(f"נטען אוטומטית: {len(st.session_state.bh_lookup)} קודי קידוח")
+            except Exception as e:
+                st.error(f"שגיאה בטעינת טבלת BH: {e}")
+
+    st.divider()
+
     # Well memory — always load from the canonical absolute path
     if not st.session_state.well_memory and os.path.exists(WELL_MEMORY_PATH):
         st.session_state.well_memory = load_well_memory(WELL_MEMORY_PATH)
@@ -279,6 +304,7 @@ if st.button("🔄 עבד קבצים", type="primary", use_container_width=True)
             interactive=False,
             well_memory=st.session_state.well_memory,
             historical_data=st.session_state.historical_data,
+            bh_lookup=st.session_state.bh_lookup,
         )
 
         for err in errors:
@@ -435,6 +461,7 @@ if missing_labs or missing_samplers or missing_wells:
                 historical_data=st.session_state.historical_data,
                 lab_code_override=overrides.get('lab'),
                 sampler_code_override=overrides.get('sampler'),
+                bh_lookup=st.session_state.bh_lookup,
             )
 
             for err in errors:

@@ -76,6 +76,94 @@ def save_well_memory(memory: dict, path: str):
 
 
 # ---------------------------------------------------------------------------
+# BH (well code) lookup table
+# ---------------------------------------------------------------------------
+
+def load_bh_lookup(path: str) -> dict:
+    """
+    Load the BH well-code lookup table (Sites_missing_BH_codes.xlsx).
+    Returns {(site_name, well_name): well_code} with normalized keys.
+    Columns expected: שם האתר (A), שם קידוח של החברה (D), קוד קידוח (E).
+    """
+    lookup = {}
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    ws = wb.active
+
+    # Detect column positions from header row
+    col_site = col_well = col_code = None
+    for col_idx in range(1, ws.max_column + 1):
+        header = ws.cell(row=1, column=col_idx).value
+        if not header:
+            continue
+        h = str(header).strip()
+        if 'שם האתר' in h:
+            col_site = col_idx
+        elif 'שם קידוח' in h:
+            col_well = col_idx
+        elif 'קוד קידוח' in h:
+            col_code = col_idx
+
+    if not all([col_site, col_well, col_code]):
+        print(f"  אזהרה: טבלת BH חסרה עמודות נדרשות (אתר/קידוח/קוד)")
+        wb.close()
+        return lookup
+
+    for row_idx in range(2, ws.max_row + 1):
+        site = ws.cell(row=row_idx, column=col_site).value
+        well = ws.cell(row=row_idx, column=col_well).value
+        code = ws.cell(row=row_idx, column=col_code).value
+        if site is None or well is None or code is None:
+            continue
+        try:
+            lookup[(str(site).strip(), str(well).strip())] = int(code)
+        except (ValueError, TypeError):
+            continue
+
+    wb.close()
+    return lookup
+
+
+def lookup_bh_code(site_name: str, well_name: str,
+                   bh_lookup: dict) -> tuple[int, str, str] | None:
+    """
+    Find a well code in the BH lookup table using mild fuzzy matching.
+    Returns (code, matched_site, matched_well) or None if not found.
+    Tries exact match first, then mild fuzzy (threshold 0.80).
+    """
+    site_s = site_name.strip()
+    well_s = well_name.strip()
+
+    # Exact match
+    if (site_s, well_s) in bh_lookup:
+        return bh_lookup[(site_s, well_s)], site_s, well_s
+
+    # Mild fuzzy: find candidate sites close to site_name
+    SITE_THRESHOLD = 0.75
+    WELL_THRESHOLD = 0.80
+
+    candidate_sites = []
+    known_sites = {s for s, _ in bh_lookup}
+    for known_site in known_sites:
+        score = SequenceMatcher(None, site_s, known_site).ratio()
+        if score >= SITE_THRESHOLD or site_s in known_site or known_site in site_s:
+            candidate_sites.append(known_site)
+
+    for csite in candidate_sites:
+        # Exact well match under fuzzy site
+        if (csite, well_s) in bh_lookup:
+            return bh_lookup[(csite, well_s)], csite, well_s
+        # Fuzzy well match under fuzzy site
+        for (s, w), code in bh_lookup.items():
+            if s != csite:
+                continue
+            score = SequenceMatcher(None, well_s, w).ratio()
+            if score >= WELL_THRESHOLD or well_s in w or w in well_s:
+                return code, csite, w
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Historical data loading
 # ---------------------------------------------------------------------------
 
@@ -377,7 +465,8 @@ def convert_report(report_path: str, param_map: dict,
                    interactive: bool = False, well_memory: dict = None,
                    historical_data: dict = None,
                    lab_code_override: int = None,
-                   sampler_code_override: int = None):
+                   sampler_code_override: int = None,
+                   bh_lookup: dict = None):
     """
     Convert a single reporting form to intake rows.
     Returns (rows, errors, warnings) where:
@@ -499,17 +588,34 @@ def convert_report(report_path: str, param_map: dict,
                 needs_resolution = True
 
         if needs_resolution:
-            # Step 1: Check memory
-            if well_memory is not None and (site_name, well_name_s) in well_memory:
+            # Step 1: Check BH lookup table (fuzzy site+well matching)
+            if bh_lookup is not None:
+                bh_result = lookup_bh_code(site_name, well_name_s, bh_lookup)
+            else:
+                bh_result = None
+
+            if bh_result is not None:
+                well_code_int, matched_site, matched_well = bh_result
+                if matched_site != site_name or matched_well != well_name_s:
+                    warnings.append(
+                        f"קוד קידוח לקידוח '{well_name_s}' הושלם מטבלת BH "
+                        f"(התאמה: אתר='{matched_site}', קידוח='{matched_well}'): {well_code_int}")
+                else:
+                    warnings.append(
+                        f"קוד קידוח לקידוח '{well_name_s}' הושלם מטבלת BH: {well_code_int}")
+                # Save to memory so future runs skip the lookup
+                if well_memory is not None:
+                    well_memory[(site_name, well_name_s)] = well_code_int
+            # Step 2: Check memory
+            elif well_memory is not None and (site_name, well_name_s) in well_memory:
                 well_code_int = well_memory[(site_name, well_name_s)]
                 warnings.append(
                     f"קוד קידוח לקידוח '{well_name_s}' הושלם מזיכרון: {well_code_int}")
-            # Step 2: Interactive prompt
+            # Step 3: Interactive prompt
             elif interactive:
                 well_code_int_or_none = prompt_well_code(site_name, well_name_s, raw_code)
                 if well_code_int_or_none is not None:
                     well_code_int = well_code_int_or_none
-                    # Save to memory
                     if well_memory is not None:
                         well_memory[(site_name, well_name_s)] = well_code_int
                     warnings.append(
@@ -518,7 +624,7 @@ def convert_report(report_path: str, param_map: dict,
                     errors.append(
                         f"קוד קידוח חסר לקידוח '{well_name_s}' — המשתמש דילג (עמודה {col_idx})")
                     continue
-            # Step 3: No resolution possible
+            # Step 4: No resolution possible
             else:
                 if raw_code is None or raw_code == '-':
                     errors.append(f"קוד קידוח חסר לקידוח '{well_name_s}' (עמודה {col_idx})")

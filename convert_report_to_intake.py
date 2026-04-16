@@ -138,8 +138,8 @@ def lookup_bh_code(site_name: str, well_name: str,
         return bh_lookup[(site_s, well_s)], site_s, well_s
 
     # Mild fuzzy: find candidate sites close to site_name
-    SITE_THRESHOLD = 0.75
-    WELL_THRESHOLD = 0.80
+    SITE_THRESHOLD = 0.9
+    WELL_THRESHOLD = 0.9
 
     candidate_sites = []
     known_sites = {s for s, _ in bh_lookup}

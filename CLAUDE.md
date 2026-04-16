@@ -4,7 +4,7 @@
 
 Tool for the Israel Water Authority (רשות המים) that converts water quality field reporting forms (Excel) from fuel site monitoring into the Authority's standardized intake format for its information system.
 
-The system handles validation, error detection, fuzzy name matching, interactive well code completion with persistent memory, historical anomaly detection, and produces both an intake file and an error report.
+The system handles validation, error detection, fuzzy name matching, interactive well code completion with persistent memory, BH lookup table resolution, historical anomaly detection, and produces both an intake file and an error report.
 
 ## Language Policy
 
@@ -27,15 +27,34 @@ CLI tool **and** importable Python module. All conversion logic lives here.
 | `convert_report()` | Main entry: reads reporting Excel → validates → returns intake rows + errors + warnings |
 | `load_param_table()` | Loads `param_table.xlsx`: numeric code → text symbol mapping (830 params) |
 | `load_csv_lookup()` | Generic CSV loader for lab/sampler reference files |
-| `load_well_memory()` / `save_well_memory()` | Persistent well code memory (site+well_name → code) |
+| `load_well_memory()` / `save_well_memory()` | Persistent well code memory (site+well_name → code). `save_well_memory` creates parent directory if missing. |
+| `load_bh_lookup()` | Loads `Sites_missing_BH_codes.xlsx`: (site, well_name) → well_code lookup table |
+| `lookup_bh_code()` | Searches BH table with mild fuzzy matching (threshold 0.9 for both site and well name, substring fallback) |
 | `load_historical_data()` | Loads historical data for anomaly detection. Auto-detects two formats: intake format (headers row 1) and historical template (headers row 5) |
 | `validate_name_code()` | Fuzzy matching of lab/sampler names against reference lists using `difflib.SequenceMatcher` and substring matching |
 | `parse_measurement()` | Parses cell values: numbers, `"<X"` below-detection → 0, empty → skip |
 | `parse_date()` | Extracts sampling date from row 3 (handles datetime objects and text in multiple formats) |
 | `prompt_well_code()` | Interactive CLI prompt for missing well codes (8-digit validation) |
 | `fuzzy_match()` | Returns scored matches above threshold, used by `validate_name_code()` |
-| `write_intake_file()` | Writes output Excel in intake format (9 columns, DD.MM.YYYY date as text) |
-| `write_error_report()` | Writes error/warning Excel with color coding (red=error, yellow=warning) |
+| `write_intake_file()` | Writes output Excel in intake format (9 columns, DD.MM.YYYY date as text). Accepts file path or `io.BytesIO`. |
+| `write_error_report()` | Writes error/warning Excel with color coding (red=error, yellow=warning). Accepts file path or `io.BytesIO`. |
+
+**`convert_report()` parameters:**
+
+```python
+convert_report(
+    report_path,
+    param_map,
+    ref_labs=None,
+    ref_samplers=None,
+    interactive=False,
+    well_memory=None,
+    historical_data=None,
+    lab_code_override=None,       # Manual override when lab code missing
+    sampler_code_override=None,   # Manual override when sampler code missing
+    bh_lookup=None,               # BH well-code lookup table
+)
+```
 
 **CLI Usage:**
 
@@ -64,23 +83,34 @@ python convert_report_to_intake.py file.xlsx \
 
 ### Frontend: `app.py`
 
-Streamlit web application wrapping the backend. Designed for a small internal team.
+Streamlit web application wrapping the backend. Designed for a small internal team running on multiple machines.
 
-**UI Flow (4 steps):**
+**Key design decisions:**
+- All paths resolved relative to script directory (`_SCRIPT_DIR`, `WELL_MEMORY_PATH`) — not CWD-dependent
+- Temp file helpers (`_load_temp_xlsx`, `_load_temp_csv`, `_convert_file_bytes`) use `try/finally` for guaranteed cleanup
+- Download files generated in `io.BytesIO` — no disk writes, no multi-user collisions
+- Reference files loaded lazily into `session_state`; errors shown in sidebar
 
-1. **Sidebar** — Reference file management: parameter table, lab codes, sampler codes, historical data. Files in `config/` or root are auto-loaded on startup.
+**UI Flow:**
+
+1. **Sidebar** — Reference file management: parameter table, lab codes, sampler codes, BH lookup table, historical data, well memory. Files in `config/` or root are auto-loaded on startup.
 2. **Step ①** — Upload one or more reporting form Excel files (drag & drop).
-3. **Step ②** — If well codes are missing: interactive text inputs appear for each missing code. On submit, codes are saved to well memory and files are re-processed.
+3. **Step ②** — If any codes are missing (lab, sampler, or well): inputs appear grouped by type. On submit, overrides are applied and files are re-processed. Well codes are saved to memory; lab/sampler codes are **not** saved (asked fresh each time).
 4. **Step ③** — Results dashboard: metrics (files, rows, errors, warnings) + expandable per-file details.
 5. **Step ④** — Preview table + download buttons for intake file and error report.
 
-**Helper function:** `find_file(*candidates)` — searches multiple paths for reference files (supports both `config/` subdirectory and root).
+**Helper functions:**
+- `find_file(*candidates)` — searches `_SCRIPT_DIR`-relative paths for reference files
+- `_load_temp_xlsx(file, fn)` / `_load_temp_csv(file, fn)` — write uploaded file to temp, call fn, clean up
+- `_convert_file_bytes(bytes, ...)` — write bytes to temp, call `convert_report()`, clean up
 
 **Run:**
 
 ```bash
 streamlit run app.py
 ```
+
+**Deployed at:** `https://water-quality-intake-jejkg9bbhkcegvtepdjbxs.streamlit.app/`
 
 ---
 
@@ -90,20 +120,21 @@ streamlit run app.py
 water-quality-intake/
 ├── CLAUDE.md                           # This file — project guide
 ├── README.md                           # User-facing documentation
-├── app.py                              # Streamlit frontend (~465 lines)
-├── convert_report_to_intake.py         # Backend engine (~935 lines)
+├── app.py                              # Streamlit frontend
+├── convert_report_to_intake.py         # Backend engine
 ├── param_table.xlsx                    # Parameter mapping table (830 rows)
+├── Sites_missing_BH_codes.xlsx         # BH well-code lookup table (~392 entries)
 ├── requirements.txt                    # Python dependencies
 ├── .gitignore
 ├── .streamlit/
 │   └── config.toml                     # Streamlit theme + upload size
 ├── config/
-│   ├── lab_codes.csv                   # Lab name → code (11 entries)
-│   ├── sampler_codes.csv               # Sampler name → code (9 entries)
-│   └── well_codes_memory.csv           # Auto-generated well code memory (gitignored)
+│   ├── lab_codes.csv                   # Lab name → code
+│   ├── sampler_codes.csv               # Sampler name → code
+│   └── well_codes_memory.csv           # Persistent well code memory (tracked in git)
 └── test_files/
     ├── Copy_of_אשקלון_טופס_דיווח_דצמבר_2020.xlsx   # 5 wells, all codes present
-    ├── דיווח_09_25.xlsx                              # 1 well, MISSING well code
+    ├── דיווח_09_25.xlsx                              # 1 well, MISSING well code (resolved via BH table)
     └── טופס_דיווח_נס_ציונה_2025.xlsx                 # 1 well, code present
 ```
 
@@ -163,6 +194,12 @@ Flat Excel table. One row per measurement per well.
 | H | סמל פרמטר | Col A → param_table.xlsx | Text symbol (e.g., CA, BENZ, MTBE) |
 | I | מעבדה | Row 4, col C | Lab code (int) |
 
+### BH Lookup Table (`Sites_missing_BH_codes.xlsx`)
+
+Excel with columns: שם האתר (A), חברה (B), חברה מייעצת (C), שם קידוח של החברה (D), קוד קידוח (E).
+
+Used to resolve missing well codes by (site_name, well_name) with fuzzy matching (threshold 0.9).
+
 ### Historical Data Format
 
 Auto-detected. Supports two layouts:
@@ -182,17 +219,19 @@ Detection: scans rows 1-10 for a row containing ≥3 of: קידוח, פרמטר,
 ### Errors (block row creation)
 
 - Missing or unparseable sampling date
-- Missing lab code that cannot be resolved from reference
-- Missing sampler code that cannot be resolved from reference
-- Missing well code without memory match and not in interactive mode
+- Missing lab code that cannot be resolved from reference or manual override
+- Missing sampler code that cannot be resolved from reference or manual override
+- Missing well code: not in form, BH table, memory, and not in interactive mode
 - Non-numeric well code that cannot be resolved
 - Unparseable measurement value (not a number, not `"<X"`, not empty)
 - No wells found in the form
 
 ### Warnings (informational, rows still created)
 
+- Well code completed from BH lookup table (with match details if fuzzy)
 - Well code completed from memory
 - Well code entered interactively
+- Lab/sampler code entered manually via UI
 - Lab/sampler name fuzzy match (close but not exact)
 - Lab/sampler name not found in reference
 - Lab code mismatch between form and reference
@@ -213,12 +252,21 @@ Detection: scans rows 1-10 for a row containing ≥3 of: קידוח, פרמטר,
 
 When a well has no valid 8-digit code in row 8:
 
-1. **Memory lookup** — check `well_codes_memory.csv` for (site_name, well_name) match
-2. **Interactive prompt** — if `--interactive` flag / Streamlit UI: ask user for code
-3. **Error** — if neither available: report error, skip well
+1. **BH lookup table** — search `Sites_missing_BH_codes.xlsx` by (site_name, well_name) with fuzzy matching (SequenceMatcher ≥0.9 or substring). Result saved to memory.
+2. **Memory lookup** — check `well_codes_memory.csv` for (site_name, well_name) match
+3. **Interactive prompt** — if `--interactive` flag / Streamlit UI: ask user for code, saved to memory
+4. **Error** — if none of the above: report error, skip well
 
 Memory is keyed by `(site_name, well_name)` where site_name comes from B2.
-New entries are saved automatically after each run.
+`well_codes_memory.csv` is tracked in git so memory persists across machines and deployments.
+
+## Lab/Sampler Code Resolution
+
+When lab or sampler code is missing or cannot be resolved from the reference CSV:
+
+1. **Reference CSV** — exact match → use ref code; fuzzy match → warning + use ref code
+2. **Manual override** — Streamlit UI prompts user to enter code per file (not saved)
+3. **Error** — if neither: report error, skip all rows for that file
 
 ---
 
@@ -269,7 +317,7 @@ No automated test suite. Manual testing with files in `test_files/`:
 | File | Wells | Codes | Tests |
 |------|-------|-------|-------|
 | Copy_of_אשקלון_...xlsx | 5 | All present | Multi-well conversion, below-detection values (0 and "<X"), full parameter set |
-| דיווח_09_25.xlsx | 1 | **Missing** | Interactive well code entry, memory save/recall |
+| דיווח_09_25.xlsx | 1 | **Missing** — resolved via BH table | BH fuzzy lookup, memory save |
 | טופס_דיווח_נס_ציונה_2025.xlsx | 1 | Present | Basic single-well conversion |
 
 **Regression test command:**
@@ -278,10 +326,22 @@ No automated test suite. Manual testing with files in `test_files/`:
 python convert_report_to_intake.py \
   test_files/Copy_of_אשקלון_טופס_דיווח_דצמבר_2020.xlsx \
   test_files/טופס_דיווח_נס_ציונה_2025.xlsx \
+  --params param_table.xlsx \
   --output /dev/null --error-report /dev/null
 ```
 
-Expected: 0 errors, 0 warnings. (דיווח_09_25 excluded because it requires interactive mode.)
+Expected: 0 errors, 0 warnings.
+
+**BH lookup test:**
+
+```bash
+python convert_report_to_intake.py \
+  test_files/דיווח_09_25.xlsx \
+  --params param_table.xlsx \
+  --output /dev/null --error-report /dev/null
+```
+
+Expected: 0 errors, 1 warning (well code completed from BH table).
 
 ---
 
@@ -293,3 +353,5 @@ Expected: 0 errors, 0 warnings. (דיווח_09_25 excluded because it requires i
 - No unnecessary comments — code should be self-explanatory
 - Error handling: collect errors/warnings in lists, don't raise exceptions during conversion
 - All file I/O uses explicit UTF-8 encoding
+- Temp files always cleaned up via `try/finally`
+- Download buffers use `io.BytesIO` (never write to shared temp dir)

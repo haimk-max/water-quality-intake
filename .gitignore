@@ -1,4 +1,17 @@
+# Output files
+קליטה_*.xlsx
+שגיאות_*.xlsx
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Python
 __pycache__/
 *.pyc
-well_codes_memory.csv
+*.pyo
+.venv/
+venv/
+
+# OS
 .DS_Store
+Thumbs.db

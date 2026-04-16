@@ -11,6 +11,7 @@ import os
 import tempfile
 from datetime import datetime
 
+import openpyxl
 import pandas as pd
 import streamlit as st
 
@@ -21,10 +22,18 @@ from convert_report_to_intake import (
     load_well_memory,
     save_well_memory,
     load_historical_data,
+    load_bh_lookup,
     convert_report,
     write_intake_file,
     write_error_report,
 )
+
+# ---------------------------------------------------------------------------
+# Paths — resolved relative to this script so the app works from any CWD
+# ---------------------------------------------------------------------------
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WELL_MEMORY_PATH = os.path.join(_SCRIPT_DIR, 'config', 'well_codes_memory.csv')
 
 
 # ---------------------------------------------------------------------------
@@ -32,11 +41,52 @@ from convert_report_to_intake import (
 # ---------------------------------------------------------------------------
 
 def find_file(*candidates):
-    """Return the first existing path from candidates, or None."""
+    """Return the first existing path from candidates, or None.
+    Searches relative to CWD and relative to the script's directory."""
     for c in candidates:
         if os.path.exists(c):
             return c
+        alt = os.path.join(_SCRIPT_DIR, c)
+        if os.path.exists(alt):
+            return alt
     return None
+
+
+def _load_temp_xlsx(uploaded_file, loader_fn, *args):
+    """Write an uploaded file to a temp path, call loader_fn(path, *args), clean up."""
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
+    try:
+        return loader_fn(tmp_path, *args)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _load_temp_csv(uploaded_file, loader_fn, *args):
+    """Write an uploaded CSV to a temp path, call loader_fn(path, *args), clean up."""
+    with tempfile.NamedTemporaryFile(suffix='.csv', delete=False, mode='wb') as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
+    try:
+        return loader_fn(tmp_path, *args)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _convert_file_bytes(stored_bytes, *args, **kwargs):
+    """Write stored bytes to a temp file, run convert_report(), clean up."""
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        tmp.write(stored_bytes)
+        tmp_path = tmp.name
+    try:
+        return convert_report(tmp_path, *args, **kwargs)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # App config
@@ -57,9 +107,7 @@ st.markdown("""
     h1, h2, h3, p, li, td, th, label, .stSelectbox, .stMultiSelect {
         direction: rtl; text-align: right;
     }
-    /* Fix dataframe display */
     .dataframe th, .dataframe td { text-align: right !important; }
-    /* Sidebar */
     section[data-testid="stSidebar"] { direction: rtl; text-align: right; }
 </style>
 """, unsafe_allow_html=True)
@@ -78,6 +126,8 @@ if 'well_memory' not in st.session_state:
     st.session_state.well_memory = {}
 if 'historical_data' not in st.session_state:
     st.session_state.historical_data = None
+if 'bh_lookup' not in st.session_state:
+    st.session_state.bh_lookup = None
 if 'conversion_results' not in st.session_state:
     st.session_state.conversion_results = None
 
@@ -94,18 +144,19 @@ with st.sidebar:
     params_file = st.file_uploader(
         "param_table.xlsx", type=['xlsx'], key='params_upload')
     if params_file:
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-            tmp.write(params_file.read())
-            tmp_path = tmp.name
-        st.session_state.param_map = load_param_table(tmp_path)
-        os.unlink(tmp_path)
-        st.success(f"נטענו {len(st.session_state.param_map)} פרמטרים")
+        try:
+            st.session_state.param_map = _load_temp_xlsx(params_file, load_param_table)
+            st.success(f"נטענו {len(st.session_state.param_map)} פרמטרים")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת טבלת פרמטרים: {e}")
     elif st.session_state.param_map is None:
-        # Try loading from default location
         _p = find_file('config/param_table.xlsx', 'param_table.xlsx')
         if _p:
-            st.session_state.param_map = load_param_table(_p)
-            st.info(f"נטען אוטומטית: {len(st.session_state.param_map)} פרמטרים")
+            try:
+                st.session_state.param_map = load_param_table(_p)
+                st.info(f"נטען אוטומטית: {len(st.session_state.param_map)} פרמטרים")
+            except Exception as e:
+                st.error(f"שגיאה בטעינת טבלת פרמטרים: {e}")
         else:
             st.warning("נדרש קובץ טבלת פרמטרים")
 
@@ -115,32 +166,35 @@ with st.sidebar:
     st.subheader("קודי מעבדות")
     labs_file = st.file_uploader("lab_codes.csv", type=['csv'], key='labs_upload')
     if labs_file:
-        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False, mode='wb') as tmp:
-            tmp.write(labs_file.read())
-            tmp_path = tmp.name
-        st.session_state.ref_labs = load_csv_lookup(tmp_path, 'שם מעבדה', 'קוד מעבדה')
-        os.unlink(tmp_path)
-        st.success(f"נטענו {len(st.session_state.ref_labs)} מעבדות")
-    elif st.session_state.ref_labs is None and find_file('config/lab_codes.csv', 'config/lab_codes.csv'):
-        st.session_state.ref_labs = load_csv_lookup(find_file('config/lab_codes.csv', 'config/lab_codes.csv'), 'שם מעבדה', 'קוד מעבדה')
-        st.info(f"נטען אוטומטית: {len(st.session_state.ref_labs)} מעבדות")
+        try:
+            st.session_state.ref_labs = _load_temp_csv(
+                labs_file, load_csv_lookup, 'שם מעבדה', 'קוד מעבדה')
+            st.success(f"נטענו {len(st.session_state.ref_labs)} מעבדות")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת קודי מעבדות: {e}")
+    elif st.session_state.ref_labs is None:
+        _l = find_file('config/lab_codes.csv', 'lab_codes.csv')
+        if _l:
+            st.session_state.ref_labs = load_csv_lookup(_l, 'שם מעבדה', 'קוד מעבדה')
+            st.info(f"נטען אוטומטית: {len(st.session_state.ref_labs)} מעבדות")
 
     # Sampler codes
     st.subheader("קודי חברות דיגום")
     samplers_file = st.file_uploader(
         "sampler_codes.csv", type=['csv'], key='samplers_upload')
     if samplers_file:
-        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False, mode='wb') as tmp:
-            tmp.write(samplers_file.read())
-            tmp_path = tmp.name
-        st.session_state.ref_samplers = load_csv_lookup(
-            tmp_path, 'שם חברת דיגום', 'קוד חברת דיגום')
-        os.unlink(tmp_path)
-        st.success(f"נטענו {len(st.session_state.ref_samplers)} חברות")
-    elif st.session_state.ref_samplers is None and find_file('config/sampler_codes.csv', 'config/sampler_codes.csv'):
-        st.session_state.ref_samplers = load_csv_lookup(
-            find_file('config/sampler_codes.csv', 'config/sampler_codes.csv'), 'שם חברת דיגום', 'קוד חברת דיגום')
-        st.info(f"נטען אוטומטית: {len(st.session_state.ref_samplers)} חברות")
+        try:
+            st.session_state.ref_samplers = _load_temp_csv(
+                samplers_file, load_csv_lookup, 'שם חברת דיגום', 'קוד חברת דיגום')
+            st.success(f"נטענו {len(st.session_state.ref_samplers)} חברות")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת קודי חברות דיגום: {e}")
+    elif st.session_state.ref_samplers is None:
+        _s = find_file('config/sampler_codes.csv', 'sampler_codes.csv')
+        if _s:
+            st.session_state.ref_samplers = load_csv_lookup(
+                _s, 'שם חברת דיגום', 'קוד חברת דיגום')
+            st.info(f"נטען אוטומטית: {len(st.session_state.ref_samplers)} חברות")
 
     st.divider()
 
@@ -149,16 +203,41 @@ with st.sidebar:
     hist_file = st.file_uploader(
         "קובץ היסטורי (xlsx)", type=['xlsx'], key='hist_upload')
     if hist_file:
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-            tmp.write(hist_file.read())
-            tmp_path = tmp.name
-        st.session_state.historical_data = load_historical_data(tmp_path)
-        os.unlink(tmp_path)
-        st.success(f"נטענו {len(st.session_state.historical_data)} רשומות היסטוריות")
+        try:
+            st.session_state.historical_data = _load_temp_xlsx(
+                hist_file, load_historical_data)
+            st.success(f"נטענו {len(st.session_state.historical_data)} רשומות היסטוריות")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת נתונים היסטוריים: {e}")
 
     st.divider()
 
-    # Well memory
+    # BH lookup table
+    st.subheader("טבלת קודי קידוחים (BH)")
+    bh_file = st.file_uploader(
+        "Sites_missing_BH_codes.xlsx", type=['xlsx'], key='bh_upload')
+    if bh_file:
+        try:
+            st.session_state.bh_lookup = _load_temp_xlsx(bh_file, load_bh_lookup)
+            st.success(f"נטענו {len(st.session_state.bh_lookup)} קודי קידוח")
+        except Exception as e:
+            st.error(f"שגיאה בטעינת טבלת BH: {e}")
+    elif st.session_state.bh_lookup is None:
+        _bh = find_file('Sites_missing_BH_codes.xlsx',
+                        'config/Sites_missing_BH_codes.xlsx')
+        if _bh:
+            try:
+                st.session_state.bh_lookup = load_bh_lookup(_bh)
+                st.info(f"נטען אוטומטית: {len(st.session_state.bh_lookup)} קודי קידוח")
+            except Exception as e:
+                st.error(f"שגיאה בטעינת טבלת BH: {e}")
+
+    st.divider()
+
+    # Well memory — always load from the canonical absolute path
+    if not st.session_state.well_memory and os.path.exists(WELL_MEMORY_PATH):
+        st.session_state.well_memory = load_well_memory(WELL_MEMORY_PATH)
+
     st.subheader("זיכרון קודי קידוחים")
     if st.session_state.well_memory:
         st.info(f"{len(st.session_state.well_memory)} רשומות בזיכרון")
@@ -167,10 +246,6 @@ with st.sidebar:
             st.rerun()
     else:
         st.caption("ריק — ייבנה אוטומטית מהקלדות")
-
-    # Load from file
-    if find_file('config/well_codes_memory.csv', 'config/well_codes_memory.csv') and not st.session_state.well_memory:
-        st.session_state.well_memory = load_well_memory(find_file('config/well_codes_memory.csv', 'config/well_codes_memory.csv'))
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +280,15 @@ if not uploaded_files:
 st.success(f"הועלו {len(uploaded_files)} קבצים")
 
 # ---------------------------------------------------------------------------
-# Step 2: Process files and detect missing well codes
+# Step 2: Process files
 # ---------------------------------------------------------------------------
 
 if st.button("🔄 עבד קבצים", type="primary", use_container_width=True):
     all_rows = []
     all_results = []
-    missing_wells = []  # [(file, site, well_name, col_idx, raw_code)]
+    missing_wells = []
+    missing_labs = []
+    missing_samplers = []
 
     progress = st.progress(0, text="מעבד קבצים...")
 
@@ -219,27 +296,24 @@ if st.button("🔄 עבד קבצים", type="primary", use_container_width=True)
         progress.progress((i + 1) / len(uploaded_files),
                           text=f"מעבד: {uploaded.name}")
 
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-            tmp.write(uploaded.read())
-            tmp_path = tmp.name
-
-        rows, errors, warnings = convert_report(
-            tmp_path,
+        rows, errors, warnings = _convert_file_bytes(
+            uploaded.read(),
             st.session_state.param_map,
             ref_labs=st.session_state.ref_labs,
             ref_samplers=st.session_state.ref_samplers,
             interactive=False,
             well_memory=st.session_state.well_memory,
             historical_data=st.session_state.historical_data,
+            bh_lookup=st.session_state.bh_lookup,
         )
 
-        os.unlink(tmp_path)
-
-        # Detect missing well codes from errors
         for err in errors:
             if 'קוד קידוח חסר' in err or 'קוד קידוח לא מספרי' in err:
                 missing_wells.append((uploaded.name, err))
+            if 'קוד מעבדה חסר' in err:
+                missing_labs.append((uploaded.name, err))
+            if 'קוד חברת דיגום חסר' in err:
+                missing_samplers.append((uploaded.name, err))
 
         all_rows.extend(rows)
         all_results.append((uploaded.name, errors, warnings, len(rows)))
@@ -250,12 +324,14 @@ if st.button("🔄 עבד קבצים", type="primary", use_container_width=True)
         'all_rows': all_rows,
         'all_results': all_results,
         'missing_wells': missing_wells,
+        'missing_labs': missing_labs,
+        'missing_samplers': missing_samplers,
         'uploaded_files': [(f.name, f.getvalue()) for f in uploaded_files],
     }
     st.rerun()
 
 # ---------------------------------------------------------------------------
-# Step 3: Show results and handle missing well codes
+# Step 3: Handle missing codes
 # ---------------------------------------------------------------------------
 
 results = st.session_state.conversion_results
@@ -265,92 +341,136 @@ if results is None:
 all_rows = results['all_rows']
 all_results = results['all_results']
 missing_wells = results['missing_wells']
+missing_labs = results.get('missing_labs', [])
+missing_samplers = results.get('missing_samplers', [])
 
-# --- Missing well codes interactive resolution ---
+if missing_labs or missing_samplers or missing_wells:
+    st.header("② השלמת נתונים חסרים")
 
-if missing_wells:
-    st.header("② השלמת קודי קידוח חסרים")
-    st.warning(f"נמצאו {len(missing_wells)} קידוחים עם קוד חסר או לא תקין")
+    # Lab codes
+    lab_inputs = {}
+    if missing_labs:
+        st.subheader("קודי מעבדה חסרים")
+        st.warning(f"נמצאו {len(missing_labs)} קבצים עם קוד מעבדה חסר")
+        for idx, (fname, err_msg) in enumerate(missing_labs):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input("קוד מעבדה", key=f"lab_code_{idx}",
+                                     placeholder="למשל: 6")
+                if code:
+                    lab_inputs[idx] = code
 
+    # Sampler codes
+    sampler_inputs = {}
+    if missing_samplers:
+        st.subheader("קודי חברות דיגום חסרים")
+        st.warning(f"נמצאו {len(missing_samplers)} קבצים עם קוד חברת דיגום חסר")
+        for idx, (fname, err_msg) in enumerate(missing_samplers):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input("קוד חברת דיגום", key=f"sampler_code_{idx}",
+                                     placeholder="למשל: 23")
+                if code:
+                    sampler_inputs[idx] = code
+
+    # Well codes
     well_inputs = {}
-    for idx, (fname, err_msg) in enumerate(missing_wells):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.text(f"📁 {fname}: {err_msg}")
-        with col2:
-            code = st.text_input(
-                "קוד (8 ספרות)",
-                key=f"well_code_{idx}",
-                max_chars=8,
-                placeholder="12345678",
-            )
-            if code:
-                well_inputs[idx] = code
+    if missing_wells:
+        st.subheader("קודי קידוח חסרים")
+        st.warning(f"נמצאו {len(missing_wells)} קידוחים עם קוד חסר או לא תקין")
+        for idx, (fname, err_msg) in enumerate(missing_wells):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📁 {fname}: {err_msg}")
+            with col2:
+                code = st.text_input("קוד (8 ספרות)", key=f"well_code_{idx}",
+                                     max_chars=8, placeholder="12345678")
+                if code:
+                    well_inputs[idx] = code
 
-    if st.button("🔄 עבד מחדש עם הקודים שהוקלדו", use_container_width=True):
-        # Parse entered codes and update well memory
-        import openpyxl as _openpyxl
+    if st.button("🔄 עבד מחדש עם הנתונים שהוקלדו", use_container_width=True):
+        # Build per-file overrides for lab/sampler
+        file_overrides = {}
 
+        for idx, code_str in lab_inputs.items():
+            try:
+                file_overrides.setdefault(missing_labs[idx][0], {})['lab'] = int(code_str)
+            except ValueError:
+                st.error(f"קוד מעבדה לא מספרי: '{code_str}'")
+
+        for idx, code_str in sampler_inputs.items():
+            try:
+                file_overrides.setdefault(missing_samplers[idx][0], {})['sampler'] = int(code_str)
+            except ValueError:
+                st.error(f"קוד חברת דיגום לא מספרי: '{code_str}'")
+
+        # Process well codes and update memory
         new_memory_entries = {}
         for idx, code_str in well_inputs.items():
-            try:
-                code_int = int(code_str)
-                if len(code_str) == 8:
-                    # Extract site and well name from the uploaded file
-                    fname = missing_wells[idx][0]
-                    for stored_name, stored_bytes in results['uploaded_files']:
-                        if stored_name == fname:
-                            with tempfile.NamedTemporaryFile(
-                                    suffix='.xlsx', delete=False) as tmp:
-                                tmp.write(stored_bytes)
-                                tmp_path = tmp.name
-                            wb = _openpyxl.load_workbook(tmp_path, data_only=True)
-                            ws = wb.active
-                            site_name = ws.cell(row=2, column=2).value or '?'
-                            # Find the well name from error message
-                            err_msg = missing_wells[idx][1]
-                            if "'" in err_msg:
-                                well_name = err_msg.split("'")[1]
-                                st.session_state.well_memory[
-                                    (site_name, well_name)] = code_int
-                                new_memory_entries[(site_name, well_name)] = code_int
-                            wb.close()
-                            os.unlink(tmp_path)
-                            break
-                else:
-                    st.error(f"קוד {code_str} אינו 8 ספרות")
-            except ValueError:
-                st.error(f"ערך לא מספרי: {code_str}")
+            if len(code_str) != 8 or not code_str.isdigit():
+                st.error(f"קוד קידוח חייב להיות 8 ספרות: '{code_str}'")
+                continue
+            code_int = int(code_str)
+            fname = missing_wells[idx][0]
+            for stored_name, stored_bytes in results['uploaded_files']:
+                if stored_name != fname:
+                    continue
+                with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                    tmp.write(stored_bytes)
+                    tmp_path = tmp.name
+                try:
+                    wb = openpyxl.load_workbook(tmp_path, data_only=True)
+                    try:
+                        site_name = wb.active.cell(row=2, column=2).value or '?'
+                    finally:
+                        wb.close()
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                err_msg = missing_wells[idx][1]
+                if "'" in err_msg:
+                    well_name = err_msg.split("'")[1]
+                    st.session_state.well_memory[(site_name, well_name)] = code_int
+                    new_memory_entries[(site_name, well_name)] = code_int
+                break
 
         if new_memory_entries:
-            # Save memory to disk
-            save_well_memory(st.session_state.well_memory, 'config/well_codes_memory.csv')
-            st.success(f"נשמרו {len(new_memory_entries)} קודים חדשים לזיכרון")
+            save_well_memory(st.session_state.well_memory, WELL_MEMORY_PATH)
+            st.success(f"נשמרו {len(new_memory_entries)} קודי קידוח חדשים לזיכרון")
 
-        # Re-process all files
+        # Re-process all files with overrides
         all_rows = []
         all_results = []
         missing_wells = []
+        missing_labs = []
+        missing_samplers = []
 
         for stored_name, stored_bytes in results['uploaded_files']:
-            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-                tmp.write(stored_bytes)
-                tmp_path = tmp.name
-
-            rows, errors, warnings = convert_report(
-                tmp_path,
+            overrides = file_overrides.get(stored_name, {})
+            rows, errors, warnings = _convert_file_bytes(
+                stored_bytes,
                 st.session_state.param_map,
                 ref_labs=st.session_state.ref_labs,
                 ref_samplers=st.session_state.ref_samplers,
                 interactive=False,
                 well_memory=st.session_state.well_memory,
                 historical_data=st.session_state.historical_data,
+                lab_code_override=overrides.get('lab'),
+                sampler_code_override=overrides.get('sampler'),
+                bh_lookup=st.session_state.bh_lookup,
             )
-            os.unlink(tmp_path)
 
             for err in errors:
                 if 'קוד קידוח חסר' in err or 'קוד קידוח לא מספרי' in err:
                     missing_wells.append((stored_name, err))
+                if 'קוד מעבדה חסר' in err:
+                    missing_labs.append((stored_name, err))
+                if 'קוד חברת דיגום חסר' in err:
+                    missing_samplers.append((stored_name, err))
 
             all_rows.extend(rows)
             all_results.append((stored_name, errors, warnings, len(rows)))
@@ -359,6 +479,8 @@ if missing_wells:
             'all_rows': all_rows,
             'all_results': all_results,
             'missing_wells': missing_wells,
+            'missing_labs': missing_labs,
+            'missing_samplers': missing_samplers,
             'uploaded_files': results['uploaded_files'],
         }
         st.rerun()
@@ -379,7 +501,6 @@ col2.metric("שורות קליטה", total_rows)
 col3.metric("שגיאות", total_errors, delta_color="inverse")
 col4.metric("אזהרות", total_warnings, delta_color="inverse")
 
-# Per-file details
 for fname, errors, warnings, row_count in all_results:
     with st.expander(
             f"{'🔴' if errors else '🟢'} {fname} — "
@@ -400,14 +521,10 @@ for fname, errors, warnings, row_count in all_results:
 if total_rows > 0:
     st.header("④ תצוגה מקדימה והורדה")
 
-    # Preview
     preview_data = []
     for row in all_rows[:50]:
         date_val = row['C']
-        if isinstance(date_val, datetime):
-            date_str = date_val.strftime('%d.%m.%Y')
-        else:
-            date_str = date_val
+        date_str = date_val.strftime('%d.%m.%Y') if isinstance(date_val, datetime) else date_val
         preview_data.append({
             'מקור מים': row['A'],
             'מס ש"ה': row['B'],
@@ -418,36 +535,24 @@ if total_rows > 0:
             'מעבדה': row['I'],
         })
 
-    st.dataframe(
-        pd.DataFrame(preview_data),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(pd.DataFrame(preview_data), use_container_width=True, hide_index=True)
     if total_rows > 50:
         st.caption(f"מוצגות 50 שורות מתוך {total_rows}")
 
-    # Generate files for download
+    # Generate output files in memory (no temp disk files)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # Intake file
-    intake_path = os.path.join(tempfile.gettempdir(), f'קליטה_{timestamp}.xlsx')
-    write_intake_file(all_rows, intake_path)
-    with open(intake_path, 'rb') as f:
-        intake_bytes = f.read()
-    os.unlink(intake_path)
+    intake_buf = io.BytesIO()
+    write_intake_file(all_rows, intake_buf)
 
-    # Error report
-    error_path = os.path.join(tempfile.gettempdir(), f'שגיאות_{timestamp}.xlsx')
-    write_error_report(all_results, error_path)
-    with open(error_path, 'rb') as f:
-        error_bytes = f.read()
-    os.unlink(error_path)
+    error_buf = io.BytesIO()
+    write_error_report(all_results, error_buf)
 
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
             label=f"📥 הורד קובץ קליטה ({total_rows} שורות)",
-            data=intake_bytes,
+            data=intake_buf.getvalue(),
             file_name=f"קליטה_{timestamp}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
@@ -455,11 +560,11 @@ if total_rows > 0:
         )
     with col2:
         st.download_button(
-            label=f"📋 הורד דוח שגיאות",
-            data=error_bytes,
+            label="📋 הורד דוח שגיאות",
+            data=error_buf.getvalue(),
             file_name=f"שגיאות_{timestamp}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-elif not missing_wells:
+elif not missing_wells and not missing_labs and not missing_samplers:
     st.error("לא נוצרו שורות קליטה. בדוק את דוח השגיאות.")

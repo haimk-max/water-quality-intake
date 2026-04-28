@@ -236,7 +236,7 @@ Detection: scans rows 1-10 for a row containing ≥3 of: קידוח, פרמטר,
 - Lab/sampler name not found in reference
 - Lab code mismatch between form and reference
 - Parameter code not in param_table.xlsx (rows skipped)
-- **ECFD ≥ 100** — likely unit error (mS/cm vs µS/cm)
+- **ECFD ≥ 100** — likely unit error (mS/cm vs µS/cm); value auto-corrected by dividing by 1000
 - **Historical anomaly** — value differs by ≥2 orders of magnitude (×100 or ÷100) from previous measurement for same well+parameter
 
 ### Special Parameters

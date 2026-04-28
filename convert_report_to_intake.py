@@ -748,8 +748,11 @@ def convert_report(report_path: str, param_map: dict,
             max_val = PARAM_MAX_VALUES[param]
             if val >= max_val:
                 src = row_data.get('_source', {})
+                corrected = val / 1000
+                row_data['G'] = corrected
                 warnings.append(
-                    f"ערך {param} חריג: {val} (מעל {max_val}) "
+                    f"ערך {param} חריג: {val} (מעל {max_val}) — "
+                    f"תוקן ל-{corrected} "
                     f"בקידוח '{src.get('well', '?')}' שורה {src.get('row', '?')}")
 
     # Historical anomaly detection (2 orders of magnitude)
